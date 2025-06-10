@@ -161,6 +161,7 @@ Include relevant links from the content if possible.
     except Exception as e:
         logging.exception("OpenAI API call failed")
         raise HTTPException(status_code=500, detail=str(e))
-
+"""
 if __name__ == "__main__":
     uvicorn.run("calling_api_ve:app", host="0.0.0.0", port=8000, reload=DEBUG_MODE)
+"""

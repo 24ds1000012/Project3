@@ -10,6 +10,7 @@ import faiss
 import numpy as np
 from playwright.async_api import async_playwright
 import json
+from fastapi.middleware.cors import CORSMiddleware
 
 
 # Load environment variables
@@ -50,6 +51,14 @@ index = faiss.IndexFlatL2(embedding_dim)
 index.add(np.array(chunk_embeddings))
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class QARequest(BaseModel):
     question: str
@@ -116,6 +125,14 @@ async def scrape_discourse_post(url: str) -> str:
 
         finally:
             await browser.close()
+
+@app.get("/")
+async def root():
+    return {"message": "API is running"}
+
+@app.get("/api")
+async def api_root():
+    return {"message": "API endpoint - POST requests only"}
 
 @app.post("/api/", response_model=QAResponse)
 async def answer_question(request_raw: Request):

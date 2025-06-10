@@ -1,16 +1,12 @@
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import List, Optional
-import os, re, logging
+import os, re, logging, json
 from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
-import uvicorn
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-from playwright.async_api import async_playwright
-import json
 from fastapi.middleware.cors import CORSMiddleware
+import numpy as np
+import faiss
 
 # Load environment variables
 load_dotenv()
@@ -21,7 +17,7 @@ DISCOURSE_EMAIL = os.getenv("DISCOURSE_EMAIL")
 DISCOURSE_PASSWORD = os.getenv("DISCOURSE_PASSWORD")
 DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"
 
-# Configure logging
+# Logging setup
 logging.basicConfig(
     level=logging.DEBUG if DEBUG_MODE else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
@@ -31,7 +27,6 @@ if not OPENAI_API_KEY:
     raise ValueError("API_KEY_NEW not found in environment variables")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-
 app = FastAPI()
 
 app.add_middleware(
@@ -42,22 +37,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-with open("extracted_contents_filtered_v1.doc", "r", encoding="utf-8") as f:
-    raw_chunks = [chunk.strip() for chunk in f.read().split("\n\n") if chunk.strip()]
-
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+# Lazy-loadable global variables
+raw_chunks = None
+chunk_embeddings = None
+index = None
+embedder = None
 embedding_dim = 384
 
-try:
-    chunk_embeddings = np.load("chunk_embeddings.npy")
-    assert chunk_embeddings.shape[1] == embedding_dim
-except Exception:
-    logging.warning("Embedding file not found or shape mismatch. Recomputing...")
-    chunk_embeddings = embedder.encode(raw_chunks)
-    np.save("chunk_embeddings.npy", chunk_embeddings)
+def load_embeddings_and_index():
+    global raw_chunks, chunk_embeddings, index, embedder
 
-index = faiss.IndexFlatL2(embedding_dim)
-index.add(np.array(chunk_embeddings))
+    if raw_chunks is not None:
+        return  # Already loaded
+
+    with open("extracted_contents_filtered_v1.doc", "r", encoding="utf-8") as f:
+        raw_chunks = [chunk.strip() for chunk in f.read().split("\n\n") if chunk.strip()]
+
+    chunk_embeddings = np.load("chunk_embeddings.npy")
+    if chunk_embeddings.shape[1] != embedding_dim:
+        raise ValueError("Embedding shape mismatch")
+
+    import faiss  # local import to save memory at startup
+    index = faiss.IndexFlatL2(embedding_dim)
+    index.add(np.array(chunk_embeddings))
+
+    from sentence_transformers import SentenceTransformer
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 class QARequest(BaseModel):
     question: str
@@ -67,28 +72,6 @@ class QARequest(BaseModel):
 class QAResponse(BaseModel):
     answer: str
     links: List[dict]
-
-async def scrape_discourse_post(url: str) -> str:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=not DEBUG_MODE)
-        context = await browser.new_context()
-        page = await context.new_page()
-        try:
-            await page.goto("https://discourse.onlinedegree.iitm.ac.in/login", timeout=60000)
-            await page.fill('#login-account-name', DISCOURSE_EMAIL)
-            await page.fill('#login-account-password', DISCOURSE_PASSWORD)
-            await page.click("#login-button")
-            await page.wait_for_url(lambda url: "login" not in url, timeout=15000)
-            await page.goto(url, timeout=60000)
-            await page.wait_for_selector(".topic-post .cooked", timeout=30000)
-            post_elements = await page.locator(".topic-post .cooked").all()
-            all_posts = [await post_el.inner_text() for post_el in post_elements]
-            return "\n\n---\n\n".join(post.strip() for post in all_posts)
-        except Exception as e:
-            logging.exception("Scraping failed")
-            raise e
-        finally:
-            await browser.close()
 
 @app.get("/")
 async def root():
@@ -113,13 +96,9 @@ async def answer_question(request_raw: Request):
         raise HTTPException(status_code=400, detail="Invalid image data")
 
     if request.link:
-        try:
-            context = await scrape_discourse_post(request.link)
-            if not context.strip():
-                raise Exception("Empty scraped content.")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Scraping failed: {e}")
+        context = await scrape_discourse_post(request.link)
     else:
+        load_embeddings_and_index()
         question_embedding = embedder.encode([request.question])
         D, I = index.search(np.array(question_embedding), k=10)
         context_chunks = [raw_chunks[idx] for idx in I[0]]
@@ -161,6 +140,30 @@ Include relevant links from the content if possible.
     except Exception as e:
         logging.exception("OpenAI API call failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+async def scrape_discourse_post(url: str) -> str:
+    from playwright.async_api import async_playwright
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=not DEBUG_MODE)
+        context = await browser.new_context()
+        page = await context.new_page()
+        try:
+            await page.goto("https://discourse.onlinedegree.iitm.ac.in/login", timeout=60000)
+            await page.fill('#login-account-name', DISCOURSE_EMAIL)
+            await page.fill('#login-account-password', DISCOURSE_PASSWORD)
+            await page.click("#login-button")
+            await page.wait_for_url(lambda url: "login" not in url, timeout=15000)
+            await page.goto(url, timeout=60000)
+            await page.wait_for_selector(".topic-post .cooked", timeout=30000)
+            post_elements = await page.locator(".topic-post .cooked").all()
+            all_posts = [await post_el.inner_text() for post_el in post_elements]
+            return "\n\n---\n\n".join(post.strip() for post in all_posts)
+        except Exception as e:
+            logging.exception("Scraping failed")
+            raise HTTPException(status_code=500, detail=f"Scraping failed: {e}")
+        finally:
+            await browser.close()
+
 """
 if __name__ == "__main__":
     uvicorn.run("calling_api_ve:app", host="0.0.0.0", port=8000, reload=DEBUG_MODE)

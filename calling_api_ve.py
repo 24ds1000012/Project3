@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import os, re, logging
 from openai import OpenAI
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 import uvicorn
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -16,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 # Load environment variables
 load_dotenv()
 OPENAI_API_KEY = os.getenv("API_KEY_NEW")
+env_path = find_dotenv()  # Finds the .env file path
+print("Using .env file at:", env_path)
 DISCOURSE_EMAIL = os.getenv("DISCOURSE_EMAIL")
 DISCOURSE_PASSWORD = os.getenv("DISCOURSE_PASSWORD")
 DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"

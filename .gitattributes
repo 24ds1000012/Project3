@@ -1,0 +1,4 @@
+*.py text
+*.txt text
+*.md text
+Dockerfile text
